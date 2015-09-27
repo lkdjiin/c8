@@ -1,0 +1,331 @@
+---
+title: "Using Machine Learning to Predict the Qualitative Execution of Weight Lifting Exercices"
+author: Xavier Nayrac
+date: 2015-09-27
+output:
+  html_document:
+    fig_caption: true
+    theme: cosmo
+    highlight: espresso
+    css: styles.css
+---
+
+# Abstract
+
+It is demonstrated that the qualitative execution of weight lifting exercices
+can be predicted using machine learning. Two different algorithms will be tried.
+The first one, **recursive partitioning** won't show us a good enough accuracy
+(about 75%). Contrary to the second one, **random forest**, that will show an
+accuracy of more than 99%. Finally, using five times less variables from the dataset
+(the most important ones), we will obtain the almost same accuracy of 99%,
+but five times faster.
+
+# Introduction
+
+The objective of this project is to predict the qualitative execution of weight
+Each set of measurements is classified into one of five classes (A, B, C, D,
+E).
+
+This is a classification problem, so after cleaning the dataset I'm going to
+use a recursive partitioning algorithm (rpart). We will see that this algorithm
+is fast, but not very accurate for our problem. I will make a second try with
+the random forest algorithm, much slower but also much accurate for our
+problem.  To stay reasonnably fast with the random forest algorithm, I will
+make use of parallelization.  Both algorithms will be used with cross
+validation.
+
+I will show that the accuracy of the random forest algorithm is almost perfect
+for our problem.
+
+Finally, I will discuss the selection of the most important features only.
+
+It should be noted that throughout this paper I will use the words *variable*,
+*feature* and *column* interchangeably.
+
+# Methods
+
+## The Dataset
+
+```{r setup, echo=F, message=F}
+library(caret)
+library(rpart)
+library(randomForest)
+library(parallel)
+library(doParallel)
+library(corrplot)
+library(xtable)
+library(RColorBrewer)
+
+set.seed(1234)
+```
+
+The dataset used in this project comes from [HAR](http://groupware.les.inf.puc-rio.br/har).
+
+```{r load_dataset}
+df <- read.csv('data/pml-training.csv', na.strings=c("NA", "#DIV/0!"))
+```
+
+There is `r ncol(df)` features for `r nrow(df)` observations.
+
+## Training and Cross Validation
+
+Before doing anything else, I'm going to partition the dataset between a training
+set (60%) and a validation set (40%).
+
+```{r training_and_validation}
+inTrain <- createDataPartition(y=df$classe, p=.6, list=F)
+training <- df[inTrain, ]
+validation <- df[-inTrain, ]
+```
+
+```{r, echo=F}
+rm("df")
+rm("inTrain")
+```
+
+The training set will be cleaned, but I will not touch at all to the validation
+set.
+
+## Cleansing
+
+I remove the first two features. One is simply the observation's index and the
+other is the user's name. None of them contribute to the `classe` of the
+exercices.
+
+Next I remove all features with a variance near to zero. Those are features
+that doesn't contribute enough (or even not at all) to the classification to be kept.
+
+After that, I remove all features with NA values. I know this is a very drastic
+cleansing but, if the
+algorithm performs well the first time without those features, this will be a big win.
+
+Finally, I remove the first four remaining features, as the authors of the study
+claim in their paper that those are not measurements.
+
+So after the cleaning, the dataset has now `r ncol(training)` features.
+
+It's worth noting that the cleansing was surprisingly quick and easy.
+
+```{r cleaning}
+training <- training[, !grepl("X", names(training))]
+training <- training[, !grepl("user_name", names(training))]
+nzv <- nearZeroVar(training)
+training <- training[, -nzv]
+nas <- apply(training, 2, function(x) sum(is.na(x)) > 0)
+training <- training[, !nas]
+training <- training[, -(1:4)]
+```
+
+## Machine Learning Model
+
+### Recursive Partitioning
+
+First I use a recursive partitioning algorithm through the `rpart()` function of
+the *rpart* R package. The algorithm runs quickly, but is not very accurate for
+our problem (at least with default settings).
+
+```{r rpart, cache=T}
+fit0 <- rpart(classe ~ ., data=training, method="class")
+prediction0 <- predict(fit0, validation, type="class")
+accuracy0 <-sum(validation$classe == prediction0) / length(prediction0)
+cat(accuracy0)
+```
+
+An accuracy of `r accuracy0` is not good enough.
+
+### Random Forest
+
+I'm going to use the `randomForest()` function from the *randomForest* R package directly, because it is way
+faster than its *caret* wrapper. But to further reduce the time taken by the
+algorithm, I'm going to add some parallelization. I'm going to use 3 CPU cores, each of
+them computing 400 trees.
+
+```{r random_forest, cache=T}
+cl <- makeCluster(3)
+registerDoParallel(cl)
+fit1 <- foreach(ntree=c(400, 400, 400),
+                .combine=combine, .packages='randomForest') %dopar% {
+    randomForest(classe ~ ., data=training, ntree=ntree, importance=T)
+}
+stopCluster(cl)
+```
+
+Now it's time to validate the model on the validation set.
+
+```{r prediction, cache=T}
+prediction <- predict(fit1, validation, type="class")
+```
+
+# Results
+
+With an accuracy of `r accuracy0` and an expected out of sample error of
+`r 1 - accuracy0` for the recursive partitioning algorithm it's a fail.
+
+But for the random forest algorithm it's a win.
+
+```{r result_accuracy, echo=F}
+accuracy <- sum(validation$classe == prediction) / length(prediction)
+```
+
+The accuracy of this model is `r accuracy` and so the expected out of sample
+error is `r 1 - accuracy`. It's a very accurate model to predict the
+qualitative execution of weight lifting exercices.
+
+Results of both algorithms are summarized in the following table:
+
+```{r results_table, echo=F, results='asis'}
+results <- data.frame(Recursive.partioning=c(accuracy0, 1 - accuracy0), Random.forest=c(accuracy, 1 - accuracy))
+rownames(results) <- c("Accuracy", "Out of sample error")
+print(xtable(results, caption="Comparison of both algorithms", digits=3),
+      type="html",
+      comment=F,
+      include.rownames=T)
+```
+
+# Discussion
+
+## An Almost Perfect Detection of Classe A
+
+A subset table taken from the confusion matrix is showing us that the prediction on class A is almost perfect:
+
+```{r discussion_1, echo=F, results='asis'}
+class_table <- confusionMatrix(prediction, validation$classe)$byClass[, c(1,2,8)]
+print(xtable(class_table, caption="Subset for classe A", digits=3),
+      type="html",
+      comment=F,
+      include.rownames=T)
+```
+## Using Fewer Variables
+
+It's worth noting that an reasonnably accurate model could be built with only
+9 features instead of 52. This could be use to compute the fitted model faster.
+
+On my system, `randomForest` takes more or less 82 seconds to complete with 52
+features, but just 15 seconds to complete with 9 features.
+
+Here I'm going to keep only the 9 most important variables to build a second
+model:
+
+```{r discussion_2, cache=T}
+t2 <- training[, c(1, 2, 3, 39, 38, 41, 19, 14, 40, 53)]
+cl <- makeCluster(3)
+registerDoParallel(cl)
+fit2 <- foreach(ntree=c(400, 400, 400), .combine=combine, .packages='randomForest') %dopar% {
+    randomForest(classe ~ ., data=t2, ntree=ntree, importance=T)
+}
+stopCluster(cl)
+prediction2 <- predict(fit2, validation, type="class")
+```
+
+The accuracy of this «dimished» model is still pretty good:
+
+```{r discussion_confusion}
+confusionMatrix(prediction2, validation$classe)[["overall"]][["Accuracy"]]
+```
+
+As you can see, the two predictions are very close to each other:
+
+```{r discussion_tables, echo=F, results='asis'}
+table1 <- confusionMatrix(prediction, validation$classe)$table
+table2 <- confusionMatrix(prediction2, validation$classe)$table
+print(xtable(table1, caption="Model with 52 features"),
+      type="html",
+      comment=FALSE,
+      include.rownames=FALSE)
+print(xtable(table2, caption="Model with 9 features"),
+      type="html",
+      comment=FALSE,
+      include.rownames=FALSE)
+```
+
+# Conclusions
+
+As expected, classifications algorithms works well on classification problem and
+the quality of weight lifting exercices can be predicted by machine learning.
+
+On the one hand, we have seen that *rpart* algorithm is quick but its accuracy
+is not really good. Anyway it can be a good «first try».
+
+On the other hand, the *random forest* algorithm performed very well on our
+carefully cleaned data.  However, one should not hesitate to keep only a few
+features if time is a concern.
+
+# References
+
+[Qualitative activity recognition of weight lifting exercices](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)
+
+[Source code of this document](https://github.com/lkdjiin/c8)
+
+# Appendix A
+## Most Important Features
+
+```{r appendix_a, fig.cap="mean decrease accuracy and gini", echo=F}
+varImpPlot(fit1, main="Most Important Features", n.var=12)
+```
+
+# Appendix B
+## Correlation Matrix
+
+There is `r 52 * (52 - 1) / 2` unique correlations. It could be useful to see
+it all in a plot.
+
+```{r appendix_b, fig.cap="unique spearman's r", echo=F, fig.height=8, fig.width=8}
+corrplot(cor(training[, -53]),
+         method="circle", type="lower", title="Correlation", mar=c(0,0,4,0))
+```
+
+# Appendix C
+## Classes
+
+Classes in the dataset are all on the same order of magnitude.
+
+```{r appendix_c, fig.cap="the five classes", echo=F}
+barplot(table(training$classe), main="Classes", col=brewer.pal(5, "Set2"))
+```
+
+# Appendix D
+## Timing
+
+First the timing of the recursive partitioning algorithm with 52 variables:
+
+```{r appendix_d_algo1, cache=T}
+system.time( fit0 <- rpart(classe ~ ., data=training, method="class") )
+```
+
+Then the timing of the random forest algorithm with 52 variables:
+
+```{r appendix_d_algo2, cache=T}
+system.time({
+    cl <- makeCluster(3)
+    registerDoParallel(cl)
+    fit1 <- foreach(ntree=c(400, 400, 400),
+                    .combine=combine, .packages='randomForest') %dopar% {
+        randomForest(classe ~ ., data=training, ntree=ntree, importance=T)
+    }
+    stopCluster(cl)
+})
+```
+
+Finally the timing of the random forest algorithm with 9 variables:
+
+```{r appendix_d_algo3, cache=T}
+system.time({
+    cl <- makeCluster(3)
+    registerDoParallel(cl)
+    fit2 <- foreach(ntree=c(400, 400, 400),
+                    .combine=combine, .packages='randomForest') %dopar% {
+        randomForest(classe ~ ., data=t2, ntree=ntree, importance=T)
+    }
+    stopCluster(cl)
+})
+```
+
+# Appendix E
+## Confusion Matrix of the Best Model
+
+This is the confusion matrix of the best model, that is the random forest
+algorithm on 52 features.
+
+```{r best_model_confusion}
+confusionMatrix(prediction, validation$classe)
+```
